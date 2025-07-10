@@ -1,0 +1,15 @@
+{
+  "name": "address-ki/address-corrector",
+  "description": "Eine KI für Adresskorrekturen",
+  "type": "project",
+  "require": {
+    "php": "^8.2",
+    "ext-pdo": "*",
+    "monolog/monolog": "^3.0"
+  },
+  "autoload": {
+    "psr-4": {
+      "AddressCorrector\\": "src/"
+    }
+  }
+}
