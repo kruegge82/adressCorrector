@@ -225,16 +225,22 @@ class AddressDatabase
         // Führende Nullen entfernen
         $formattedPostalCode = ltrim($postalCode, '0');
 
-        $sql = "SELECT DISTINCT NAME46 
-            FROM `DHL-STRA-DB` 
-            WHERE PLZ = :postalCode";
+        // SQL-Abfrage mit JOIN für neuen Straßenname
+        $sql = "SELECT 
+                CASE 
+                    WHEN s.`NAMEN-SCHL-NEU` > 0 THEN s_new.NAME46 
+                    ELSE s.NAME46 
+                END AS NAME46
+            FROM `DHL-STRA-DB` s
+            LEFT JOIN `DHL-STRA-DB` s_new ON s.`NAMEN-SCHL-NEU` = s_new.`NAMEN-SCHL`
+            WHERE s.PLZ = :postalCode
+            GROUP BY NAME46";
 
         $stmt = $this->pdo->prepare($sql);
         $stmt->execute([':postalCode' => $formattedPostalCode]);
 
         return $stmt->fetchAll(PDO::FETCH_COLUMN);
     }
-
 
     public function findSimilarStreet($streetName, array $availableStreets)
     {
@@ -307,4 +313,52 @@ class AddressDatabase
     {
         return $this->pdo;
     }
+
+    public function getStreetsWithDetails(string $postalCode)
+    {
+        $formattedPostalCode = ltrim($postalCode, '0');
+
+        $sql = "SELECT 
+                s.NAME46,
+                s_old.NAME46 AS OLD_NAME
+            FROM `DHL-STRA-DB` s
+            LEFT JOIN `DHL-STRA-DB` s_old ON s.`NAMEN-SCHL` = s_old.`NAMEN-SCHL-NEU`
+            WHERE s.PLZ = :postalCode";
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute([':postalCode' => $formattedPostalCode]);
+
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+    public function calculateStreetSimilarity(string $original, string $corrected): float
+    {
+        $original = mb_strtolower($original);
+        $corrected = mb_strtolower($corrected);
+
+        // Levenshtein-Distanz
+        $maxLen = max(mb_strlen($original), mb_strlen($corrected));
+        $distance = levenshtein($original, $corrected);
+        $similarity = 1.0 - ($distance / $maxLen);
+
+        // Bonus für exakte Übereinstimmung
+        if ($original === $corrected) {
+            return 1.0;
+        }
+
+        // Bonus für gemeinsame Präfixe
+        $prefixLength = 0;
+        $minLen = min(mb_strlen($original), mb_strlen($corrected));
+        for ($i = 0; $i < $minLen; $i++) {
+            if ($original[$i] === $corrected[$i]) {
+                $prefixLength++;
+            } else {
+                break;
+            }
+        }
+        $prefixScore = $prefixLength / $minLen;
+        $similarity = max($similarity, $prefixScore);
+
+        return $similarity;
+    }
+
 }

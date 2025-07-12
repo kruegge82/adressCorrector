@@ -36,190 +36,16 @@ class AddressCorrector
         ));
     }
 
-    /**
-     * Korrigiert eine gegebene Adresse
-     * @param string $address Die zu korrigierende Adresse
-     * @return array Die korrigierte Adresse mit zusätzlichen Informationen
-     * @throws AddressCorrectionException
-     */
-    public function correctAddress(string $address): array
-    {
-        if (!$this->validator->isValidInput($address)) {
-            throw new AddressCorrectionException('Ungültige Adresseingabe');
-        }
 
-        $this->logger->info('Starte Adresskorrektur', ['input' => $address]);
-
-        // Adresse parsen (z.B. Straße, Hausnummer, PLZ, Ort extrahieren)
-        $components = $this->parseAddress($address);
-        $components['original_address'] = $address;
-
-        // 1. Ort normalisieren (z.B. Bindestrich-Orte kürzen)
-        if (isset($components['city'])) {
-            $components['city'] = $this->normalizeCityName($components['city']);
-        }
-
-        // 2. Ort korrigieren anhand PLZ und Datenbank
-        if (isset($components['city']) && isset($components['postal_code'])) {
-            $correctedCity = $this->database->findClosestCity($components['city'], $components['postal_code']);
-            if ($correctedCity !== $components['city']) {
-                $this->logger->info('Stadt korrigiert', [
-                    'original' => $components['city'],
-                    'corrected' => $correctedCity
-                ]);
-                $components['city'] = $correctedCity;
-            }
-        }
-
-        // 3. Straße normalisieren (Abkürzungen etc.)
-        if (isset($components['street'])) {
-            $components['street'] = $this->normalizeStreetName($components['street']);
-        }
-
-        // 4. Hausnummer vorne erkennen und trennen
-        if (isset($components['street'])) {
-            $split = $this->splitStreetAndNumber($components['street']);
-            $components['street'] = $split['street'];
-            if (!empty($split['street_number'])) {
-                $components['street_number'] = $split['street_number'];
-            }
-        }
-
-        // 5. Straße korrigieren anhand PLZ und Datenbank
-        if (isset($components['street']) && isset($components['postal_code'])) {
-            $availableStreets = $this->database->findStreetsByPostalCode($components['postal_code']);
-            if (!empty($availableStreets)) {
-                $correctedStreet = $this->database->findSimilarStreet($components['street'], $availableStreets);
-                if ($correctedStreet && $correctedStreet !== $components['street']) {
-                    $originalStreet = $components['street'];
-                    $components['street'] = $correctedStreet;
-                    $this->logger->info('Straße korrigiert', [
-                        'original' => $originalStreet,
-                        'corrected' => $correctedStreet
-                    ]);
-                }
-            }
-        }
-
-        // 6. PLZ und Ort validieren
-        if (isset($components['postal_code']) && isset($components['city'])) {
-            if (!$this->database->validatePostalCode($components['postal_code'], $components['city'])) {
-                $this->logger->warning('PLZ passt nicht zur korrigierten Stadt', [
-                    'city' => $components['city'],
-                    'postal_code' => $components['postal_code']
-                ]);
-            }
-        }
-
-        // 7. Ortsteil (District) ermitteln, falls möglich
-        if (isset($components['postal_code']) && isset($components['city'])) {
-            $district = $this->database->findCityDistrict(
-                $components['city'],
-                $components['postal_code'],
-                $components['street'] ?? null
-            );
-            if ($district) {
-                $components['district'] = $district;
-            }
-        }
-
-        // 8. Ergebnis zusammenbauen
-        $result = $this->buildResult($components);
-
-        $this->logger->info('Adresskorrektur erfolgreich', ['result' => $result]);
-
-        return $result;
-    }
-
-
-
-    private function buildResult(array $components): array {
-        $result = [
-            'original' => $components['original_address'],
-            'corrected' => '',
-            'components' => [],
-            'confidence_score' => isset($components['street']) ? 1.0 : 0.7
-        ];
-
-        // Komponenten für die Ausgabe aufbereiten
-        foreach (['postal_code', 'street_number', 'street', 'city', 'district'] as $key) {
-            if (isset($components[$key])) {
-                $result['components'][$key] = $components[$key];
-            }
-        }
-
-        // Korrigierte Adresse zusammenbauen
-        $addressParts = [];
-        if (isset($components['street'])) {
-            $streetPart = $components['street'];
-            if (isset($components['street_number'])) {
-                $streetPart .= ' ' . $components['street_number'];
-            }
-            $addressParts[] = $streetPart;
-        }
-
-        if (isset($components['postal_code'])) {
-            $locationPart = $components['postal_code'];
-            if (isset($components['city'])) {
-                $locationPart .= ' ' . $components['city'];
-            }
-            $addressParts[] = $locationPart;
-        }
-
-        $result['corrected'] = implode(', ', $addressParts);
-
-        return $result;
-    }
-
-    private function parseAddress(string $address): array
-    {
-        $parts = [];
-
-        // Versuche zuerst mit Komma zu splitten
-        $addressParts = explode(',', $address);
-
-        if (count($addressParts) >= 2) {
-            // Straße und Hausnummer
-            $streetPart = trim($addressParts[0]);
-            if (preg_match('/\s*(\d+[a-z]?)\s*$/i', $streetPart, $matches)) {
-                $parts['street_number'] = $matches[1];
-                $parts['street'] = trim(str_replace($matches[0], '', $streetPart));
-            } else {
-                $parts['street'] = $streetPart;
-            }
-
-            // PLZ und Stadt
-            $locationPart = trim($addressParts[1]);
-            if (preg_match('/\b(\d{5})\b/', $locationPart, $matches)) {
-                $parts['postal_code'] = $matches[1];
-                $cityPart = trim(str_replace($matches[0], '', $locationPart));
-                if ($cityPart) {
-                    $parts['city'] = $cityPart;
-                }
-            }
-        } else {
-            // Kein Komma, versuche PLZ und Stadt zu extrahieren
-            if (preg_match('/(\d{5})\s+(.+)$/', $address, $matches)) {
-                $parts['postal_code'] = $matches[1];
-                $parts['city'] = trim($matches[2]);
-
-                // Straße und Hausnummer sind der Rest vor PLZ
-                $streetPart = trim(str_replace($matches[0], '', $address));
-                if (preg_match('/\s*(\d+[a-z]?)\s*$/i', $streetPart, $matchesStreet)) {
-                    $parts['street_number'] = $matchesStreet[1];
-                    $parts['street'] = trim(str_replace($matchesStreet[0], '', $streetPart));
-                } else {
-                    $parts['street'] = $streetPart;
-                }
-            } else {
-                // Fallback: nur Straße (keine PLZ/Stadt)
-                $parts['street'] = $address;
-            }
-        }
-
-        return $parts;
-    }
     public function correctAddressComponents(array $fields): array {
+
+        $confidence = 1.0;
+
+        // Speichere ursprüngliche Straße
+        if (isset($fields['street'])) {
+            $tmp_street = $fields['street'];
+        }
+
         // 1. Zusätze aus Straße extrahieren (z.B. Landgasthof etc.)
         $fields = $this->extractAddressAdditionFromStreet($fields);
         $fields = $this->extractAddressAddition($fields);
@@ -230,6 +56,7 @@ class AddressCorrector
         if (empty($fields['street']) || !$this->database->streetExists($fields['street'], $fields['postal_code'])) {
             // Versuche Straße aus company oder address_addition zu extrahieren
             $fields = $this->tryExtractStreetFromOtherFields($fields);
+            $confidence -= 0.1; // Korrektur aus anderen Feldern reduziert Vertrauen
         }
 
         // 4. Hausnummer vorne erkennen und trennen
@@ -239,13 +66,52 @@ class AddressCorrector
             $fields['street_number'] = $split['street_number'];
         }
 
-        // 5. Straße mit Datenbank abgleichen und ggf. korrigieren
-        if (!empty($fields['street']) && !empty($fields['postal_code'])) {
+        // 5. Straße korrigieren anhand PLZ und Datenbank
+        if (isset($fields['street']) && isset($fields['postal_code'])) {
             $availableStreets = $this->database->findStreetsByPostalCode($fields['postal_code']);
             if (!empty($availableStreets)) {
-                $correctedStreet = $this->database->findSimilarStreet($fields['street'], $availableStreets);
-                if ($correctedStreet && $correctedStreet !== $fields['street']) {
+                // Prüfe, ob der ursprüngliche Name in der Datenbank als veraltet markiert ist
+                $originalStreet = $fields['street'];
+                $correctedStreet = $originalStreet;
+
+                // Hole alle Straßen mit PLZ
+                $streetsWithDetails = $this->database->getStreetsWithDetails($fields['postal_code']);
+
+                foreach ($streetsWithDetails as $street) {
+                    $currentName = $street['NAME46'];
+                    $oldName = $street['OLD_NAME'] ?? null;
+
+                    // Wenn der ursprüngliche Name veraltet ist, ersetze durch neuen Namen
+                    if ($oldName && mb_strtolower($oldName) === mb_strtolower($originalStreet)) {
+                        $correctedStreet = $currentName;
+                        $fields['original_street']=$tmp_street;
+                        $confidence += 0.1; // Strasse wurde ersetzt deshalb setzen wir den abzug wieder plus
+                        break;
+                    }
+                }
+
+                // Setze korrigierten Namen
+                if ($correctedStreet !== $originalStreet) {
                     $fields['street'] = $correctedStreet;
+                    $this->logger->info('Straße ersetzt durch neuen Namen', [
+                        'original' => $originalStreet,
+                        'corrected' => $correctedStreet
+                    ]);
+                } else {
+                    // Fallback: Suche nach ähnlichen Straßen
+                    $correctedStreet = $this->database->findSimilarStreet($originalStreet, $availableStreets);
+                    if ($correctedStreet && $correctedStreet !== $originalStreet) {
+                        $fields['street'] = $correctedStreet;
+                        $this->logger->info('Straße korrigiert', [
+                            'original' => $originalStreet,
+                            'corrected' => $correctedStreet
+                        ]);
+
+                        // Ähnlichkeitsscore für Straße berechnen
+                        $streetSimilarity = $this->database->calculateStreetSimilarity($originalStreet, $correctedStreet);
+                        $confidence = max(0.0, $confidence - (1.0 - $streetSimilarity) * 0.3);
+
+                    }
                 }
             }
         }
@@ -257,6 +123,7 @@ class AddressCorrector
                     'postal_code' => $fields['postal_code'],
                     'city' => $fields['city']
                 ]);
+                $confidence -= 0.2; // PLZ-Stadt-Abweichung reduziert Vertrauen
             }
         }
 
@@ -269,8 +136,11 @@ class AddressCorrector
             );
             if ($district) {
                 $fields['district'] = $district;
+            } else {
+                $confidence -= 0.1; // Kein Ortsteil gefunden
             }
         }
+        $fields['confidence_score'] = $confidence;
 
         return $fields;
     }
