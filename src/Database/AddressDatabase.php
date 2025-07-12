@@ -14,7 +14,7 @@ class AddressDatabase
     private $config;
     private $logPath;
 
-    public function __construct(array $config, string $logPath = null)
+    public function __construct(array $config, ?string $logPath = null)
     {
         $this->config = $config;
         $this->logPath = $logPath ?: __DIR__ . '/../../logs/address_corrector.log';

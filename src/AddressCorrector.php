@@ -17,7 +17,7 @@ class AddressCorrector
     private $validator;
     private $config;
 
-    public function __construct(array $config = null)
+    public function __construct(?array $config = null)
     {
         $this->config = $config ?: require __DIR__ . '/../config.php';
         $this->initializeLogger();
