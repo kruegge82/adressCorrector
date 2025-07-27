@@ -265,7 +265,7 @@ class AddressDatabase
         return ($highestScore > 0.7) ? $bestMatch : $streetName;
     }
 
-    private function calculateComplexStreetSimilarity($str1, $str2): float
+    public function calculateComplexStreetSimilarity($str1, $str2): float
     {
 
         // 1. Exakte Übereinstimmung
@@ -276,6 +276,8 @@ class AddressDatabase
         // 2. Levenshtein-Distanz (30% Gewichtung)
         $maxLen = max(strlen($str1), strlen($str2));
         $levenScore = 1 - (levenshtein($str1, $str2) / $maxLen);
+
+        //$levenScore = 100 - similar_text($str1, $str2, $levenScore)/100;
 
         // 3. Gemeinsame Buchstaben am Anfang (40% Gewichtung)
         $prefixLength = 0;

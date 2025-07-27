@@ -53,10 +53,17 @@ class AddressCorrector
         $fields = $this->normalizeAddressFields($fields);
 
         // 3. Prüfen, ob Straße in der Datenbank existiert
-        if (empty($fields['street']) || !$this->database->streetExists($fields['street'], $fields['postal_code'])) {
-            // Versuche Straße aus company oder address_addition zu extrahieren
-            $fields = $this->tryExtractStreetFromOtherFields($fields);
-            $confidence -= 0.1; // Korrektur aus anderen Feldern reduziert Vertrauen
+        if(!$this->database->streetExists($fields['street'], $fields['postal_code'])) {
+            $allStreets = $this->database->findStreetsByPostalCode($fields['postal_code']); // bereits vorhandene Methode
+            $bestStreet = $this->findBestMatchingStreet($fields['street'], $allStreets);
+            if ($bestStreet !== null) {
+                $fields['street_number']=trim(str_replace($bestStreet,"",$fields['street']));
+                $fields['street']=$bestStreet;
+            } else {
+                // Versuche Straße aus company oder address_addition zu extrahieren
+                $fields = $this->tryExtractStreetFromOtherFields($fields);
+                $confidence -= 0.1; // Korrektur aus anderen Feldern reduziert Vertrauen
+            }
         }
 
         // 4. Hausnummer vorne erkennen und trennen
@@ -65,6 +72,12 @@ class AddressCorrector
         if (!empty($split['street_number'])) {
             $fields['street_number'] = $split['street_number'];
         }
+        // Haunsummer aus address_addition extrahieren wenn Sie noch leer ist
+        if (empty($fields['street_number']) && preg_match('/\d{1,5}\s*[a-zA-Z]?([\/\-]\s*\d{1,5}\s*[a-zA-Z]?)?/', $fields['address_addition'], $matches)) {
+            $fields['street_number']=trim($matches[0]); //enthält die gefundene Hausnummer
+            $fields['address_addition']=str_replace($matches[0],"",$fields['address_addition']);
+        }
+
 
         // 5. Straße korrigieren anhand PLZ und Datenbank
         if (isset($fields['street']) && isset($fields['postal_code'])) {
@@ -82,7 +95,7 @@ class AddressCorrector
                     $oldName = $street['OLD_NAME'] ?? null;
 
                     // Wenn der ursprüngliche Name veraltet ist, ersetze durch neuen Namen
-                    if ($oldName && mb_strtolower($oldName) === mb_strtolower($originalStreet)) {
+                    if ($oldName && mb_strtolower($oldName) === mb_strtolower($originalStreet) && mb_strtolower($oldName)!=mb_strtolower($street['NAME46'])) {
                         $correctedStreet = $currentName;
                         $fields['original_street']=$tmp_street;
                         $confidence += 0.1; // Strasse wurde ersetzt deshalb setzen wir den abzug wieder plus
@@ -143,6 +156,22 @@ class AddressCorrector
         $fields['confidence_score'] = $confidence;
 
         return $fields;
+    }
+
+    private function removeExactDuplicate($text) {
+        $text = trim(preg_replace('/\s+/', ' ', $text)); // Mehrfache Leerzeichen entfernen
+        $words = explode(' ', $text);
+        $count = count($words);
+
+        if ($count % 2 === 0 && $count > 0) {
+            $half = $count / 2;
+            $first = implode(' ', array_slice($words, 0, $half));
+            $second = implode(' ', array_slice($words, $half));
+            if ($first === $second) {
+                return $first;
+            }
+        }
+        return $text;
     }
 
     /**
@@ -216,17 +245,80 @@ class AddressCorrector
         return $fields;
     }
 
+    private function findBestMatchingStreet(string $inputStreet, array $databaseStreets): ?string
+    {
+        $inputVariants = $this->generateStreetVariants($inputStreet);
+        $bestMatch = null;
+        $bestScore = 0;
+        foreach ($databaseStreets as $dbStreet) {
+            foreach ($inputVariants as $inputVariant) {
+                if($inputVariant===$dbStreet) {
+                    return 1;
+                }
+                $score = $this->database->calculateComplexStreetSimilarity($inputVariant, $dbStreet);
+                if ($score > $bestScore) {
+                    $bestScore = $score;
+                    $bestMatch = $dbStreet;
+                }
+            }
+        }
+
+        return ($bestScore >= 0.7) ? $bestMatch : null; // Threshold anpassen
+    }
+    private function generateStreetVariants(string $input): array
+    {
+        $abbreviationMap = [
+            'Sr.' => 'Schwester',
+            'Bgm.' => 'Bürgermeister',
+            'Dr.' => 'Doktor',
+            'Fr.' => 'Franziskaner',
+            'Prof.' => 'Professor'
+        ];
+
+        //$input = strtolower($input);
+        //$input = str_replace(['-', '.', ','], ' ', $input);
+        $words = explode(' ', $input);
+
+        $variants = [$input]; // Original als erste Variante
+
+        // Erzeuge Variante mit ersetzten Abkürzungen
+        $expanded = $words;
+        foreach ($expanded as $i => $word) {
+            $expanded2=array();
+            foreach ($abbreviationMap as $search => $replace) {
+                $expanded2[] = str_replace($search,$replace,$words);
+            }
+        }
+        foreach($expanded2 as $i => $details)
+        $variants[] = implode(' ', $details);
+
+        // Erzeuge Variante mit gekürzten Formen (Langform → Abkürzung)
+        $reversedMap = array_flip($abbreviationMap);
+        $contracted = $words;
+        foreach ($contracted as $i => $word) {
+            $expanded2=array();
+            foreach ($abbreviationMap as $search => $replace) {
+                $expanded2[] = str_replace($search,$replace,$words);
+            }
+        }
+        foreach($expanded2 as $i => $details)
+            $variants[] = implode(' ', $details);
+
+        return array_unique($variants);
+    }
 
     /**
      * Normalisiert Straßennamen (Abkürzungen etc.)
      */
     private function normalizeStreetName(string $street): string
     {
+        $street= $this->removeExactDuplicate($street); // Gibt "Steinbrink 6" aus
 
         $patterns = [
             '/straße\b/i',
             '/strasse\b/i',
             '/str(?!\.)\b/iu',
+            '/ str(?!\.)\b/iu',
             '/pl\.\b/i',
         ];
 
@@ -234,6 +326,7 @@ class AddressCorrector
             'str.',
             'str.',
             'str.',
+            ' str.',
             'platz',
         ];
 
@@ -346,8 +439,9 @@ class AddressCorrector
                 foreach ($streetsInDb as $knownStreet) {
                     $knownStreetNormalized = $this->normalizeStreetName($knownStreet);
 
-                    if (mb_stripos($candidateStreetNormalized, $knownStreetNormalized) !== false) {
+                    if ($candidateStreetNormalized === $knownStreetNormalized) {
                         // Straße gefunden
+                        error_log($knownStreetNormalized);
                         $toreplace=$fields[$field];
                         if ($field === 'company') {
                             // Tausch: alter street-Wert in company, neue Straße in street
